@@ -30,8 +30,12 @@ shipDictionary = {}
 def main():
     parser = argparse.ArgumentParser(description="Check Royal Caribbean Price")
     parser.add_argument('-c', '--config', type=str, default='config.yaml', help='Path to configuration YAML file (default: config.yaml)')
+    parser.add_argument('--listproducts', action='store_true', help='List all available products for each booking with IDs and prices')
+    parser.add_argument('--debug', action='store_true', help='Show full JSON responses for debugging')
     args = parser.parse_args()
     config_path = args.config
+    list_products_mode = args.listproducts
+    debug_mode = args.debug
 
     # Set Time with AM/PM or 24h based on locale    
     locale.setlocale(locale.LC_TIME,'')
@@ -86,7 +90,7 @@ def main():
                 session = requests.session()
                 access_token,accountId,session = login(username,password,session,cruiseLineName)
                 getLoyalty(access_token,accountId,session)
-                getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFriendlyNames)
+                getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFriendlyNames,list_products_mode,debug_mode)
     
         if 'cruises' in data:
             for cruises in data['cruises']:
@@ -269,6 +273,234 @@ def getNewBeveragePrice(access_token,accountId,session,reservationId,ship,startD
         
     
 
+def listProductsForBooking(access_token, accountId, session, reservationId, ship, startDate, passengerId, debug_mode):
+    """
+    List all available products for a specific booking with detailed information
+    Uses the authenticated catalog API similar to getNewBeveragePrice() but without specific prefix
+    """
+    headers = {
+        'Access-Token': access_token,
+        'AppKey': appKey,
+        'vds-id': accountId,
+    }
+
+    if currencyOverride != "":
+        currency = currencyOverride
+    else:
+        currency = "USD"
+
+    params = {
+        'reservationId': reservationId,
+        'startDate': startDate,
+        'currencyIso': currency,
+        'passengerId': passengerId,
+    }
+
+    # Try calling the catalog API without a specific prefix to get all categories
+    catalog_url = f'https://aws-prd.api.rccl.com/en/royal/web/commerce-api/catalog/v2/{ship}/categories'
+    
+    if debug_mode:
+        print(f"  DEBUG: Trying catalog API without prefix to get all categories")
+        print(f"  DEBUG: API Request URL: {catalog_url}")
+        print(f"  DEBUG: Request params: {params}")
+
+    response = session.get(catalog_url, params=params, headers=headers)
+    
+    if debug_mode:
+        print(f"  DEBUG: Response status: {response.status_code}")
+        if response.status_code == 200:
+            print(f"  DEBUG: Full JSON response:")
+            print(json.dumps(response.json(), indent=4))
+        else:
+            print(f"  DEBUG: Error response: {response.text}")
+        print("  " + "="*50)
+
+    if response.status_code != 200:
+        print(f"  {YELLOW}Catalog API without prefix returned {response.status_code}, falling back to mobile API{RESET}")
+        
+        # Fall back to mobile API
+        mobile_headers = {
+            'appkey': 'cdCNc04srNq4rBvKofw1aC50dsdSaPuc',
+            'accept': 'application/json',
+            'appversion': '1.54.0',
+            'accept-language': 'en',
+            'user-agent': 'okhttp/4.10.0',
+        }
+
+        mobile_params = {
+            'sailingID': ship + startDate,
+            'offset': '0',
+            'availableForSale': 'all',
+        }
+
+        if debug_mode:
+            print(f"  DEBUG: Falling back to mobile API")
+            print(f"  DEBUG: Mobile API URL: https://api.rccl.com/en/royal/mobile/v3/products")
+            print(f"  DEBUG: Mobile params: {mobile_params}")
+
+        response = requests.get('https://api.rccl.com/en/royal/mobile/v3/products', params=mobile_params, headers=mobile_headers)
+        
+        if debug_mode:
+            print(f"  DEBUG: Mobile API response status: {response.status_code}")
+            print(f"  DEBUG: Mobile API JSON response:")
+            print(json.dumps(response.json(), indent=4))
+            print("  " + "="*50)
+
+    if response.status_code != 200:
+        print(f"  {RED}Error fetching products: HTTP {response.status_code}{RESET}")
+        return
+
+    try:
+        response_data = response.json()
+        all_products = []
+        
+        # Handle catalog API response structure
+        if "payload" in response_data and isinstance(response_data["payload"], list):
+            print(f"  {GREEN}Using authenticated catalog API - booking-specific products{RESET}")
+            categories = response_data["payload"]
+            
+            # First, collect all category IDs that have products
+            categories_to_fetch = []
+            
+            for category in categories:
+                category_id = category.get("id", "Unknown")
+                category_name = category.get("categoryDisplayName", "Unknown")
+                product_count = category.get("productCount", 0)
+                
+                if debug_mode:
+                    print(f"  DEBUG: Found category: {category_id} ({category_name}) - {product_count} products")
+                
+                if product_count > 0:
+                    categories_to_fetch.append((category_id, category_name))
+                
+                # Check child categories
+                child_categories = category.get("childCategories", [])
+                for child in child_categories:
+                    child_id = child.get("id", "Unknown")
+                    child_name = child.get("categoryDisplayName", "Unknown")
+                    child_product_count = child.get("productCount", 0)
+                    
+                    if debug_mode:
+                        print(f"  DEBUG: Found child category: {child_id} ({child_name}) - {child_product_count} products")
+                    
+                    if child_product_count > 0:
+                        categories_to_fetch.append((child_id, child_name))
+            
+            # The individual category API calls are failing with 500 errors
+            # This suggests the API doesn't support fetching products by category without specific product IDs
+            # Let's fall back to the mobile API but show the categories we discovered
+            
+            print(f"  {YELLOW}Category API calls failing with 500 errors - falling back to mobile API{RESET}")
+            print(f"  {YELLOW}But we discovered these booking-specific categories:{RESET}")
+            
+            for category_id, category_name in categories_to_fetch:
+                print(f"    - {category_id}: {category_name}")
+            
+            # Fall back to mobile API
+            mobile_headers = {
+                'appkey': 'cdCNc04srNq4rBvKofw1aC50dsdSaPuc',
+                'accept': 'application/json',
+                'appversion': '1.54.0',
+                'accept-language': 'en',
+                'user-agent': 'okhttp/4.10.0',
+            }
+
+            mobile_params = {
+                'sailingID': ship + startDate,
+                'offset': '0',
+                'availableForSale': 'all',
+            }
+
+            if debug_mode:
+                print(f"  DEBUG: Falling back to mobile API")
+                print(f"  DEBUG: Mobile API URL: https://api.rccl.com/en/royal/mobile/v3/products")
+                print(f"  DEBUG: Mobile params: {mobile_params}")
+
+            response = requests.get('https://api.rccl.com/en/royal/mobile/v3/products', params=mobile_params, headers=mobile_headers)
+            
+            if debug_mode:
+                print(f"  DEBUG: Mobile API response status: {response.status_code}")
+                print(f"  DEBUG: Mobile API JSON response:")
+                print(json.dumps(response.json(), indent=4))
+                print("  " + "="*50)
+            
+            # Process mobile API response
+            if response.status_code == 200:
+                response_data = response.json()
+                products = response_data.get("payload", {}).get("products", [])
+                for product in products:
+                    # Extract prefix from categories in mobile API
+                    categories = product.get("categories", [])
+                    if categories:
+                        product["categoryPrefix"] = categories[0].get("categoryId", "N/A")
+                        product["categoryName"] = categories[0].get("categoryName", "N/A")
+                    else:
+                        product["categoryPrefix"] = "N/A"
+                        product["categoryName"] = "N/A"
+                    all_products.append(product)
+        
+        # Handle mobile API response structure
+        elif "payload" in response_data and "products" in response_data["payload"]:
+            print(f"  {YELLOW}Using mobile API - generic products for this sailing{RESET}")
+            products = response_data["payload"]["products"]
+            for product in products:
+                # Extract prefix from categories in mobile API
+                categories = product.get("categories", [])
+                if categories:
+                    product["categoryPrefix"] = categories[0].get("categoryId", "N/A")
+                    product["categoryName"] = categories[0].get("categoryName", "N/A")
+                else:
+                    product["categoryPrefix"] = "N/A"
+                    product["categoryName"] = "N/A"
+                all_products.append(product)
+        
+        if not all_products:
+            print(f"  {YELLOW}No products found{RESET}")
+            return
+
+        print(f"  Available Products ({len(all_products)} found):")
+        print(f"  {'Product Name':<40} {'ID':<15} {'Prefix':<15} {'Price':<12} {'Booking URL'}")
+        print(f"  {'-'*40} {'-'*15} {'-'*15} {'-'*12} {'-'*30}")
+        
+        for product in all_products:
+            productTitle = product.get("title", product.get("productTitle", "Unknown"))
+            productId = product.get("id", product.get("productId", "N/A"))
+            prefix = product.get("categoryPrefix", "N/A")
+            
+            # Get pricing information - try both API structures
+            price = "N/A"
+            startingFromPrice = product.get("startingFromPrice")
+            if startingFromPrice:
+                # Try catalog API pricing structure first
+                currentPrice = startingFromPrice.get("adultPromotionalPrice")
+                if not currentPrice:
+                    currentPrice = startingFromPrice.get("adultShipboardPrice")
+                if not currentPrice:
+                    # Try mobile API pricing structure
+                    currentPrice = startingFromPrice.get("adultPrice")
+                if currentPrice:
+                    price = f"${currentPrice:.2f}"
+            
+            # Try to construct booking URL
+            booking_url = "N/A"
+            if productId != "N/A":
+                booking_url = f"https://www.royalcaribbean.com/cruise-planner/booking/{reservationId}/product/{productId}"
+            
+            # Truncate long names for display
+            display_name = productTitle[:37] + "..." if len(productTitle) > 40 else productTitle
+            
+            print(f"  {display_name:<40} {productId:<15} {prefix:<15} {price:<12} {booking_url}")
+            
+            if debug_mode:
+                print(f"    DEBUG: Product JSON for '{productTitle}':")
+                print(json.dumps(product, indent=6))
+                print("    " + "-"*60)
+                
+    except Exception as e:
+        print(f"  {RED}Error parsing products: {str(e)}{RESET}")
+        if debug_mode:
+            print(f"  DEBUG: Exception details: {e}")
+
 def getLoyalty(access_token,accountId,session):
 
     headers = {
@@ -291,7 +523,7 @@ def getLoyalty(access_token,accountId,session):
         print("Casino: " + clubRoyaleLoyaltyTier + " - " + str(clubRoyaleLoyaltyIndividualPoints) + " Points")
 
     
-def getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFriendlyNames):
+def getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFriendlyNames,list_products_mode=False,debug_mode=False):
 
     headers = {
         'Access-Token': access_token,
@@ -309,11 +541,22 @@ def getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFr
         'includeCheckin': 'false',
     }
 
+    if debug_mode and not list_products_mode:
+        print(f"DEBUG: Getting voyages from API")
+        print(f"DEBUG: Request URL: https://aws-prd.api.rccl.com/v1/profileBookings/enriched/{accountId}")
+        print(f"DEBUG: Request params: {params}")
+
     response = requests.get(
         'https://aws-prd.api.rccl.com/v1/profileBookings/enriched/' + accountId,
         params=params,
         headers=headers,
     )
+
+    if debug_mode and not list_products_mode:
+        print(f"DEBUG: Response status: {response.status_code}")
+        print(f"DEBUG: Full bookings response:")
+        print(json.dumps(response.json(), indent=2))
+        print("="*50)
 
     for booking in response.json().get("payload").get("profileBookings"):
         reservationId = booking.get("bookingId")
@@ -340,7 +583,11 @@ def getVoyages(access_token,accountId,session,apobj,cruiseLineName,reservationFr
         if booking.get("balanceDue") is True:
             print(YELLOW + reservationDisplay + ": " + "Remaining Cruise Payment Balance is " + str(booking.get("balanceDueAmount")) + RESET)
 
-        getOrders(access_token,accountId,session,reservationId,passengerId,shipCode,sailDate,numberOfNights,apobj)
+        # If in list products mode, show available products instead of checking orders
+        if list_products_mode:
+            listProductsForBooking(access_token, accountId, session, reservationId, shipCode, sailDate, passengerId, debug_mode)
+        else:
+            getOrders(access_token,accountId,session,reservationId,passengerId,shipCode,sailDate,numberOfNights,apobj)
         print(" ")
     
 

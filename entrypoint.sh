@@ -13,6 +13,16 @@ if [ "$1" = "check" ]; then
     exec python CheckRoyalCaribbeanPrice.py
 fi
 
+if [ "$1" = "listproducts" ]; then
+    # Execute the Python script directly to list the products
+    exec python CheckRoyalCaribbeanPrice.py --listproducts 
+fi
+
+if [ "$1" = "debug" ]; then
+    # Execute the Python script directly to see json output from api
+    exec python CheckRoyalCaribbeanPrice.py --listproducts --debug
+fi
+
 # If other arguments are provided, execute them
 if [ $# -gt 0 ]; then
     exec "$@"
